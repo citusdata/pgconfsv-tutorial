@@ -121,5 +121,7 @@ EXECUTE insertdata(%(id)s, %(type)s, %(public)s, %(created_at)s,
         print "loaded %d rows in %f seconds, %f rows/sec" % (rows, took, rows/took)
         return (rows, took, rows/took)
 
-runner = Runner(sys.argv[1], datetime.date(2015, 01, 01), datetime.date(2015,02,01))
+runner = Runner(sys.argv[1],
+                datetime.datetime.strptime(sys.argv[2], '%Y-%m-%d'),
+                datetime.datetime.strptime(sys.argv[3], '%Y-%m-%d'))
 runner.run()
