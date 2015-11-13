@@ -109,12 +109,8 @@ BEGIN
             v_coldef_queue = v_coldef_queue || (quote_ident(v_aggname||'_diff') ||' int8');
         END LOOP;
 
-        RAISE NOTICE 'creating queue table for casc % expr %, cols %', v_cascname, v_cascexpr, array_to_string(v_coldef, ', ');
-        RAISE NOTICE '%', format('CREATE TABLE pagg_data.%s_%s(%s)', rollupname, v_cascname, array_to_string(v_coldef, ', '));
-        RAISE NOTICE '%', format('CREATE TABLE pagg_queues.%s_%s(%s)', rollupname, v_cascname, array_to_string(v_coldef_queue, ', '));
-
         EXECUTE format('CREATE TABLE pagg_data.%s_%s(%s)', rollupname, v_cascname, array_to_string(v_coldef, ', '));
-        EXECUTE format('CREATE TABLE pagg_queues.%s_%s(%s)', rollupname, v_cascname, array_to_string(v_coldef_queue, ', '));
+        EXECUTE format('CREATE TABLE pagg_queues.%s_queue_%s(%s)', rollupname, v_cascname, array_to_string(v_coldef_queue, ', '));
 
         /* TODO: We can actually combine all of these into one aggregation table? */
         FOR v_aggnum IN 1 .. array_length(agg_count, 1) LOOP
@@ -146,7 +142,7 @@ BEGIN
     END CASE;
 
     IF random() < 0.0001 THEN
-       PERFORM %11$s();
+       PERFORM %11$s(false);
     END IF;
 
     RETURN NULL;
@@ -166,7 +162,7 @@ EXECUTE PROCEDURE %2$s();
             array_to_string(v_old_grpnames, ', '),
             array_to_string(v_final_grpnames, ', '),
             quote_ident(v_aggname||'_diff'),
-            'pagg_queues.'||quote_ident(rollupname||'_'||v_cascname),
+            'pagg_queues.'||quote_ident(rollupname||'_queue_'||v_cascname),
             v_cascexpr,
             'pagg.'||quote_ident(rollupname||'_flush_'||v_aggname||'_'||v_cascname),
             v_incby
@@ -176,16 +172,9 @@ EXECUTE PROCEDURE %2$s();
             --RAISE NOTICE '%', v_sql;
             EXECUTE v_sql;
 
-            v_sql := format($sql$
             -- create function used to flush the relevant queue
-            -- 1$: funcname
-            -- 2$: queuetablename
-            -- 3$: aggname
-            -- 4$: grpcols unadorned
-            -- 5$: diffcol
-            -- 6$: mattablename
-            -- 7$: valuecol
-CREATE OR REPLACE FUNCTION %1$s()
+            v_sql := format($sql$
+CREATE OR REPLACE FUNCTION %1$s(p_wait bool DEFAULT false)
 RETURNS bool
 LANGUAGE plpgsql
 AS $body$
@@ -194,9 +183,18 @@ DECLARE
     v_updates int8;
     v_prunes int8;
 BEGIN
-    IF NOT pg_try_advisory_xact_lock('%2$s'::regclass::oid::bigint) THEN
-        RAISE NOTICE 'skipping queue flush';
-        RETURN false;
+    /*
+     * Acquire a lock preventing concurrent queue flushes. These would make it
+     * harder/more expensive to be correct.
+     */
+    IF p_wait THEN
+        RAISE NOTICE 'waiting for lock';
+        PERFORM pg_advisory_xact_lock('%2$s'::regclass::oid::bigint);
+    ELSE
+        IF NOT pg_try_advisory_xact_lock('%2$s'::regclass::oid::bigint) THEN
+            RAISE NOTICE 'skipping queue flush';
+            RETURN false;
+        END IF;
     END IF;
 
     WITH
@@ -245,16 +243,26 @@ BEGIN
 END;
 $body$;
                 $sql$,
-                'pagg.'||quote_ident(rollupname||'_flush_'||v_aggname||'_'||v_cascname), -- 1$: funcname
-                'pagg_queues.'||quote_ident(rollupname||'_'||v_cascname),                -- 2$: queuetablename
-                v_aggname,                                                               -- 3$: aggname
-                array_to_string(v_full_grpnames, ', '),				 -- 4$: grpcols unadorned
-                quote_ident(v_aggname||'_diff'),                                         -- 5$: diffcol
-                'pagg_data.'||quote_ident(rollupname||'_'||v_cascname),                  -- 6$: mattablename
-                quote_ident(v_aggname),                                                  -- 7$: valuecol
-                array_to_string(ARRAY(SELECT 'preexist.'||v FROM unnest(v_full_grpnames) v(v)), ', '),         -- 8$: preexist_grp
-                array_to_string(ARRAY(SELECT 'materialized.'||v FROM unnest(v_full_grpnames) v(v)), ', '),     -- 9$: materialized_grp
-                array_to_string(ARRAY(SELECT 'preagg.'||v FROM unnest(v_full_grpnames) v(v)), ', ')            --10$: preagg_grp
+                -- 1$: funcname
+                'pagg.'||quote_ident(rollupname||'_flush_'||v_aggname||'_'||v_cascname),
+                -- 2$: queuetablename
+                'pagg_queues.'||quote_ident(rollupname||'_queue_'||v_cascname),
+                -- 3$: aggname
+                v_aggname,
+                -- 4$: grpcols unadorned
+                array_to_string(v_full_grpnames, ', '),
+                -- 5$: diffcol
+                quote_ident(v_aggname||'_diff'),
+                -- 6$: mattablename
+                'pagg_data.'||quote_ident(rollupname||'_'||v_cascname),
+                -- 7$: valuecol
+                quote_ident(v_aggname),
+                -- 8$: preexist_grp
+                array_to_string(ARRAY(SELECT 'preexist.'||v FROM unnest(v_full_grpnames) v(v)), ', '),
+                -- 9$: materialized_grp
+                array_to_string(ARRAY(SELECT 'materialized.'||v FROM unnest(v_full_grpnames) v(v)), ', '),
+                --10$: preagg_grp
+                array_to_string(ARRAY(SELECT 'preagg.'||v FROM unnest(v_full_grpnames) v(v)), ', ')
                 );
             EXECUTE v_sql;
 
