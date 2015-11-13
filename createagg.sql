@@ -1,8 +1,8 @@
 TRUNCATE data;
 
-DROP SCHEMA pagg_queues CASCADE;
-DROP SCHEMA pagg_data CASCADE;
-DROP SCHEMA pagg CASCADE;
+DROP SCHEMA IF EXISTS pagg_queues CASCADE;
+DROP SCHEMA IF EXISTS pagg_data CASCADE;
+DROP SCHEMA IF EXISTS pagg CASCADE;
 CREATE SCHEMA pagg_queues;
 CREATE SCHEMA pagg_data;
 CREATE SCHEMA pagg;
@@ -276,27 +276,27 @@ $body$;
 END;
 $b$;
 
-SELECT pagg.create_cascaded_rollup(
-    tablename => 'data',
-    rollupname => 'data_by_type',
-    group_by => ARRAY['type'],
-    cascade => ARRAY[$$date_trunc('hour', created_at)$$, $$date_trunc('day', created_at)$$, $$date_trunc('month', created_at)$$],
-    cascade_names => ARRAY['hourly', 'daily', 'monthly'],
-    cascade_name => 'created_at',
-    agg_count => ARRAY['*'],
-    agg_count_names => ARRAY['countstar']
-);
-
 /*
 SELECT pagg.create_cascaded_rollup(
-    tablename => 'data',
-    rollupname => 'data_by_repo',
-    group_by => ARRAY[$$repo->'name'$$],
-    group_by_names => ARRAY['reponame'],
-    cascade => ARRAY[$$date_trunc(created_at, 'hour')$$, $$date_trunc(created_at, 'day')$$, $$date_trunc(created_at, 'month')$$],
-    cascade_names => ARRAY['hourly', 'daily', 'monthly'],
-    cascade_name => 'created_at',
-    agg_sum => ARRAY[$$payload->>'size'$$],
-    agg_sum_names => ARRAY['num_commits']
+    tablename := 'data',
+    rollupname := 'data_by_type',
+    group_by := ARRAY['type'],
+    cascade := ARRAY[$$date_trunc('hour', created_at)$$, $$date_trunc('day', created_at)$$, $$date_trunc('month', created_at)$$],
+    cascade_names := ARRAY['hourly', 'daily', 'monthly'],
+    cascade_name := 'created_at',
+    agg_count := ARRAY['*'],
+    agg_count_names := ARRAY['countstar']
+);
+
+SELECT pagg.create_cascaded_rollup(
+    tablename := 'data',
+    rollupname := 'data_by_repo',
+    group_by := ARRAY[$$repo->'name'$$],
+    group_by_names := ARRAY['reponame'],
+    cascade := ARRAY[$$date_trunc(created_at, 'hour')$$, $$date_trunc(created_at, 'day')$$, $$date_trunc(created_at, 'month')$$],
+    cascade_names := ARRAY['hourly', 'daily', 'monthly'],
+    cascade_name := 'created_at',
+    agg_sum := ARRAY[$$payload->>'size'$$],
+    agg_sum_names := ARRAY['num_commits']
 );
 */
