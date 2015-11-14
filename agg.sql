@@ -143,7 +143,7 @@ GROUP BY type, created_at
 ;
 
 CREATE OR REPLACE VIEW data_1_daily AS
-SELECT type, created_at, SUM(value)
+SELECT type, date_trunc('day', created_at), SUM(value)
 FROM (
     SELECT type, created_at, value
     FROM data_1_aggregated_daily
