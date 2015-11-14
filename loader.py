@@ -37,14 +37,22 @@ class Runner(object):
     def run(self):
         pool = multiprocessing.Pool(None, init_redirect_load, [redirect_load, self.dsn])
         r = None
+
+        total_rows = 0
+        starttime = time.time()
+
         try:
             results = pool.imap_unordered(redirect_load,
                 self.timeiter(self.startdate, self.enddate))
             for result in results:
-                print result
+                total_rows += result[0] # nr-rows
         except KeyboardInterrupt:
             pool.terminate()
             pool.join()
+
+        took = time.time() - starttime
+        print "over all cores: %d rows in %f seconds, %f rows/sec" % (
+            total_rows, took, total_rows/took)
 
 class Loader(object):
     prep = """
