@@ -146,16 +146,16 @@ BEGIN
     CASE TG_OP
     -- FIXME: dynamic expr & grouping columns
     WHEN 'INSERT' THEN
-        INSERT INTO %9$s(%7$s, created_at, %8$s)
+        INSERT INTO %9$s(%7$s, %13$s, %8$s)
         VALUES (%5$s, (SELECT %10$s FROM (SELECT NEW.*) f), +(SELECT %12$s FROM (SELECT NEW.*) f));
     WHEN 'UPDATE' THEN
-        INSERT INTO %9$s(%7$s, created_at, %8$s)
+        INSERT INTO %9$s(%7$s, %13$s, %8$s)
         VALUES (%6$s, (SELECT %10$s FROM (SELECT OLD.*) f), -(SELECT %12$s FROM (SELECT OLD.*) f));
 
-        INSERT INTO %9$s(%7$s, created_at, %8$s)
+        INSERT INTO %9$s(%7$s, %13$s, %8$s)
         VALUES (%5$s, (SELECT %10$s FROM (SELECT NEW.*) f), +(SELECT %12$s FROM (SELECT NEW.*) f));
     WHEN 'DELETE' THEN
-        INSERT INTO %9$s(%7$s, created_at, %8$s)
+        INSERT INTO %9$s(%7$s, %13$s, %8$s)
         VALUES (%6$s, (SELECT %10$s FROM (SELECT OLD.*) f), -(SELECT %12$s FROM (SELECT OLD.*) f));
     WHEN 'TRUNCATE' THEN
         RAISE 'truncation not supported right now';
@@ -185,7 +185,8 @@ EXECUTE PROCEDURE %2$s();
             'pagg_queues.'||quote_ident(rollupname||'_queue_'||v_cascname),
             v_cascexpr,
             'pagg.'||quote_ident(rollupname||'_flush_'||v_aggname||'_'||v_cascname),
-            v_incby
+            v_incby,
+            cascade_name
             );
             /* FIXME: Improve parameter ordering */
 
