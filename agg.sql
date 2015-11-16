@@ -154,7 +154,7 @@ FROM (
     SELECT type, created_at, diff AS value
     FROM data_1_queue_hourly
 ) combine
-GROUP BY type, created_at
+GROUP BY type, date_trunc('day', created_at)
 ;
 
 CREATE OR REPLACE VIEW data_1_hourly_uncached AS
