@@ -101,12 +101,14 @@ BEGIN
         /* build data structures related to the group by clauses */
         FOR v_grpnum IN 1 .. array_length(group_by, 1) LOOP
             v_grpexpr = group_by[v_grpnum];
+
             IF group_by_names IS NULL THEN
                 /* FIXME: better name generation */
                 v_grpname = group_by[v_grpnum];
             ELSE
                 v_grpname = group_by_names[v_grpnum];
             END IF;
+
             v_final_grpnames = v_final_grpnames || (quote_ident(v_grpname));
             v_full_grpnames = v_full_grpnames || (quote_ident(v_grpname));
             v_new_grpnames = v_new_grpnames || ('NEW.'||quote_ident(v_grpname));
@@ -121,9 +123,16 @@ BEGIN
         v_coldef = v_coldef || (quote_ident(cascade_name) ||' '||v_casctype);
         v_coldef_queue = v_coldef;
 
-        FOR v_aggnum IN 1 .. array_length(agg_count, 1) LOOP
+        -- create a column for the 'cascade' expression
+        FOR v_aggnum IN SELECT * FROM generate_series(1, array_length(agg_count, 1)) LOOP
             v_aggname = agg_count_names[v_aggnum];
             v_aggexpr = agg_count[v_aggnum];
+
+            IF v_aggexpr <> '*' THEN
+                RAISE 'only * is supported as an aggregate right now, not %', v_grpexpr;
+                -- FIXME: implementing counting simple columns ought to be
+                -- pretty simple
+            END IF;
 
             v_coldef = v_coldef || (quote_ident(v_aggname) ||' int8');
             v_coldef_queue = v_coldef_queue || (quote_ident(v_aggname||'_diff') ||' int8');
@@ -132,11 +141,18 @@ BEGIN
         EXECUTE format('CREATE TABLE pagg_data.%s_%s(%s)', rollupname, v_cascname, array_to_string(v_coldef, ', '));
         EXECUTE format('CREATE TABLE pagg_queues.%s_queue_%s(%s)', rollupname, v_cascname, array_to_string(v_coldef_queue, ', '));
 
-        /* TODO: We can actually combine all of these into one aggregation table? */
-        FOR v_aggnum IN 1 .. array_length(agg_count, 1) LOOP
+        /*
+         * create
+         *  a) trigger on the data (and finer grained) tables into the next queue tables
+         *  b) queue flush function
+         *
+         * TODO: We can actually combine all of these into one aggregation table?
+         */
+        FOR v_aggnum IN SELECT * FROM generate_series(1, array_length(agg_count, 1)) LOOP
             v_aggname = agg_count_names[v_aggnum];
             v_aggexpr = agg_count[v_aggnum];
 
+            /* create trigger */
             v_sql := format($trig$
 CREATE OR REPLACE FUNCTION %2$s()
 RETURNS TRIGGER
@@ -193,7 +209,7 @@ EXECUTE PROCEDURE %2$s();
             --RAISE NOTICE '%', v_sql;
             EXECUTE v_sql;
 
-            -- create function used to flush the relevant queue
+            -- create queue flush function
             v_sql := format($sql$
 CREATE OR REPLACE FUNCTION %1$s(p_wait bool DEFAULT false)
 RETURNS bool
