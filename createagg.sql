@@ -7,6 +7,29 @@ CREATE SCHEMA pagg_queues;
 CREATE SCHEMA pagg_data;
 CREATE SCHEMA pagg;
 
+/*
+ * Determine the resulting type of an expression, trying to avoid having to
+ * execute code.
+ *
+ * This isn't perfect, but seems to mostly work well. We could do much better
+ * in C.
+ */
+CREATE OR REPLACE FUNCTION pagg.expr_of_type(p_tablename regclass, p_expr text)
+    RETURNS text
+    LANGUAGE plpgsql
+    VOLATILE
+    AS $b$
+DECLARE
+    v_sql text;
+    v_exprtype text;
+BEGIN
+    v_sql = format($sql$SELECT pg_typeof((SELECT %s FROM %s LIMIT 0));$sql$,
+        p_expr, p_tablename::regclass);
+    EXECUTE v_sql INTO v_exprtype;
+    RETURN v_exprtype;
+END;
+$b$;
+
 CREATE OR REPLACE FUNCTION pagg.create_cascaded_rollup(
     tablename regclass,
     rollupname name,
@@ -73,8 +96,7 @@ BEGIN
     BEGIN
         v_cascname = cascade_names[v_cascnum];
         v_cascexpr = cascade[v_cascnum];
-        /* FIXME: use pg_typeof() and a faux query */
-        v_casctype = 'timestamptz';
+        v_casctype = pagg.expr_of_type(tablename, v_cascexpr);
 
         /* build data structures related to the group by clauses */
         FOR v_grpnum IN 1 .. array_length(group_by, 1) LOOP
@@ -89,10 +111,8 @@ BEGIN
             v_full_grpnames = v_full_grpnames || (quote_ident(v_grpname));
             v_new_grpnames = v_new_grpnames || ('NEW.'||quote_ident(v_grpname));
             v_old_grpnames = v_old_grpnames || ('OLD.'||quote_ident(v_grpname));
-            /* FIXME: use pg_typeof() and a faux query */
-            v_grptype = 'text';
 
-            --RAISE NOTICE 'queue table group grp % expr %', v_grpname, v_grpexpr;
+            v_grptype = pagg.expr_of_type(tablename, v_grpname);
 
             v_coldef = v_coldef || (quote_ident(v_grpname) ||' '||v_grptype);
         END LOOP;
