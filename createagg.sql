@@ -56,6 +56,8 @@ DECLARE
 
     v_curtarget name;
     v_incby text = '1'; -- FIXME, doesn't work for SUM
+
+    v_viewsources text[] = '{}';
 BEGIN
 
     IF array_length(cascade, 1) <> array_length(cascade_names, 1) THEN
@@ -93,6 +95,7 @@ BEGIN
         v_old_grpnames text[] := '{}';
         v_full_grpnames text[] := '{}';
 
+        v_queues text;
     BEGIN
         v_cascname = cascade_names[v_cascnum];
         v_cascexpr = cascade[v_cascnum];
@@ -301,6 +304,68 @@ $body$;
                 --10$: preagg_grp
                 array_to_string(ARRAY(SELECT 'preagg.'||v FROM unnest(v_full_grpnames) v(v)), ', ')
                 );
+            EXECUTE v_sql;
+
+            /*
+             * append select from queue table to array of already existing
+             * queue table selects. The less granular steps need the queues
+             * from the more granular ones.
+             */
+             v_sql = format($sql$
+    SELECT %2$s, %3$s, %5$s AS %4$s
+    FROM %1$s
+$sql$,
+                -- 1$: queuetable
+                'pagg_queues.'||quote_ident(rollupname||'_queue_'||v_cascname),
+                -- 2$: groupcols
+                array_to_string(v_final_grpnames, ', '),
+                -- 3$: cascadename
+                cascade_name,
+                -- 4$: valuecol name
+                quote_ident(v_aggname),
+                -- 5$: valuecol_diff
+                quote_ident(v_aggname||'_diff')
+                );
+
+            v_viewsources = v_viewsources || v_sql;
+
+            -- build a select from all queue tables up to this granularity
+            v_queues = array_to_string(v_viewsources, '
+  UNION ALL
+');
+
+            -- CREATE VIEW from this granularities mat table + all queues
+            v_sql := format($sql$
+CREATE VIEW %1$s AS
+SELECT %3$s, %5$s, SUM(%7$s) AS %6$s
+FROM (
+     SELECT %3$s, %4$s, %7$s
+     FROM %2$s
+   UNION ALL
+%9$s -- all queue tables follow
+) combine
+GROUP BY %3$s, %5$s
+                $sql$,
+                -- 1$: viewtablename
+                'pagg.'||quote_ident(rollupname||'_'||v_cascname),
+                -- 2$: materialized table
+                'pagg_data.'||quote_ident(rollupname||'_'||v_cascname),
+                -- 3$: groupcols
+                array_to_string(v_final_grpnames, ', '),
+                -- 4$: cascadename
+                cascade_name,
+                -- 5$: cacadeexpr
+                v_cascexpr,
+                -- 6$: aggname
+                v_aggname,
+                -- 7$: valuecol
+                quote_ident(v_aggname),
+                -- 8$: valuecol_diff
+                quote_ident(v_aggname||'_diff'),
+                -- 9$: queue table selects, UNION ALL'ed
+                v_queues
+                );
+
             EXECUTE v_sql;
 
             v_incby = quote_ident(v_aggname);
