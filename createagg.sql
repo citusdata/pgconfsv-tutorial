@@ -56,6 +56,9 @@ DECLARE
     v_incby text = '1'; -- FIXME, doesn't work for SUM
 
     v_viewsources text[] = '{}';
+
+    v_fillsql text = '';
+
 BEGIN
 
     IF array_length(cascade, 1) <> array_length(cascade_names, 1) THEN
@@ -335,7 +338,7 @@ $sql$,
             -- CREATE VIEW from this granularities mat table + all queues
             v_sql := format($sql$
 CREATE VIEW %1$s AS
-SELECT %3$s, %5$s, SUM(%7$s) AS %6$s
+SELECT %3$s, %5$s AS %4$s, SUM(%7$s) AS %6$s
 FROM (
      SELECT %3$s, %4$s, %7$s
      FROM %2$s
@@ -366,13 +369,37 @@ GROUP BY %3$s, %5$s
 
             EXECUTE v_sql;
 
+            -- create sql to run to later actually fill the aggregation tables
+            -- want to only do that on the lowest aggregation level - the
+            -- upper ones will be filled automatically
+            IF v_cascnum = 1 THEN
+               v_fillsql = v_fillsql || format($sql$
+INSERT INTO %1$s
+SELECT %2$s, %3$s, %4$s
+FROM %5$s
+GROUP BY %2$s, %3$s;
+$sql$,
+                -- 1$: mattablename
+                'pagg_data.'||quote_ident(rollupname||'_'||v_cascname),
+                -- 2$: grpcols
+                array_to_string(v_final_grpnames, ', '),
+                -- 3$: cascadexpr
+                v_cascexpr,
+                -- 4$: countexpr
+                'count(*)',
+                -- 5$: tblname
+                tablename::text
+                );
+            END IF;
+
             v_incby = quote_ident(v_aggname);
             v_curtarget = 'pagg_data.'||quote_ident(rollupname||'_'||v_cascname);
         END LOOP; /* around count aggregates */
     END;
     END LOOP;  /* around aggregation granularities */
 
-    /* create views to actually query the data */
+    RAISE NOTICE 'filling materialized tables with pre-existing data';
+    EXECUTE v_fillsql;
 END;
 $b$;
 
