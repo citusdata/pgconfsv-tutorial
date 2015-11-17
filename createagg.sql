@@ -69,6 +69,14 @@ BEGIN
         RAISE 'cascade and cascade_names parameters out of sync';
     END IF;
 
+    IF array_length(agg_count, 1) > 0 AND array_length(agg_sum, 1) > 0 THEN
+        RAISE 'sum and count cannot be done together currently';
+    END IF;
+
+    IF array_length(agg_count, 1) > 1 OR array_length(agg_sum, 1) > 1 THEN
+        RAISE 'currently only one aggregate can be computed at once';
+    END IF;
+
     v_curtarget = tablename;
 
     /* create queue tables for the cascades */
@@ -92,9 +100,10 @@ BEGIN
         v_coldef_queue text[] := '{}';
 
         v_final_grpnames text[] := '{}';
-        v_new_grpnames text[] := '{}';
-        v_old_grpnames text[] := '{}';
         v_full_grpnames text[] := '{}';
+
+        v_final_grpexprs text[] := '{}';
+        v_full_grpexprs text[] := '{}';
 
         v_queues text;
     BEGIN
@@ -113,24 +122,30 @@ BEGIN
                 v_grpname = group_by_names[v_grpnum];
             END IF;
 
+            v_final_grpexprs = v_final_grpexprs || v_grpexpr;
+
             v_final_grpnames = v_final_grpnames || (quote_ident(v_grpname));
             v_full_grpnames = v_full_grpnames || (quote_ident(v_grpname));
-            v_new_grpnames = v_new_grpnames || ('NEW.'||quote_ident(v_grpname));
-            v_old_grpnames = v_old_grpnames || ('OLD.'||quote_ident(v_grpname));
 
-            v_grptype = pagg.expr_of_type(tablename, v_grpname);
+            v_grptype = pagg.expr_of_type(tablename, v_grpexpr);
 
             v_coldef = v_coldef || (quote_ident(v_grpname) ||' '||v_grptype);
         END LOOP;
+
+        v_full_grpexprs = v_final_grpexprs || v_cascexpr;
+
+        IF v_cascnum <> 1 THEN
+            v_final_grpexprs = v_final_grpnames;
+        END IF;
 
         v_full_grpnames = v_full_grpnames || quote_ident(cascade_name);
         v_coldef = v_coldef || (quote_ident(cascade_name) ||' '||v_casctype);
         v_coldef_queue = v_coldef;
 
-        -- create a column for the 'cascade' expression
-        FOR v_aggnum IN SELECT * FROM generate_series(1, array_length(agg_count, 1)) LOOP
-            v_aggname = agg_count_names[v_aggnum];
-            v_aggexpr = agg_count[v_aggnum];
+        -- create a column for the aggregated column expression
+        IF array_length(agg_count, 1) > 0 THEN
+            v_aggname = agg_count_names[1];
+            v_aggexpr = agg_count[1];
 
             IF v_aggexpr <> '*' THEN
                 RAISE 'only * is supported as an aggregate right now, not %', v_grpexpr;
@@ -138,26 +153,79 @@ BEGIN
                 -- pretty simple
             END IF;
 
-            v_coldef = v_coldef || (quote_ident(v_aggname) ||' int8');
-            v_coldef_queue = v_coldef_queue || (quote_ident(v_aggname||'_diff') ||' int8');
-        END LOOP;
+            -- higher levels use the column
+            IF v_cascnum = 1 THEN
+               v_incby = 1;
+            END IF;
+        ELSE
+            v_aggname = agg_sum_names[1];
+            v_aggexpr = agg_sum[1];
 
-        EXECUTE format('CREATE TABLE pagg_data.%s_%s(%s)', rollupname, v_cascname, array_to_string(v_coldef, ', '));
-        EXECUTE format('CREATE TABLE pagg_queues.%s_queue_%s(%s)', rollupname, v_cascname, array_to_string(v_coldef_queue, ', '));
+            -- higher levels use the column
+            IF v_cascnum = 1 THEN
+               v_incby = v_aggexpr;
+            END IF;
+        END IF;
+
+        -- FIXME: Improve type detection
+        v_coldef = v_coldef || (quote_ident(v_aggname) ||' int8');
+        v_coldef_queue = v_coldef_queue || (quote_ident(v_aggname||'_diff') ||' int8');
+
+        --FOR v_aggnum IN SELECT * FROM generate_series(1, array_length(agg_count, 1)) LOOP
+        --    v_aggname = agg_count_names[v_aggnum];
+        --    v_aggexpr = agg_count[v_aggnum];
+	--
+        --    IF v_aggexpr <> '*' THEN
+        --        RAISE 'only * is supported as an aggregate right now, not %', v_grpexpr;
+        --        -- FIXME: implementing counting simple columns ought to be
+        --        -- pretty simple
+        --    END IF;
+	--
+        --END LOOP;
+
+        EXECUTE format('CREATE TABLE pagg_data.%s_mat_%s(%s)',
+            rollupname, v_cascname, array_to_string(v_coldef, ', '));
+        EXECUTE format('CREATE TABLE pagg_queues.%s_queue_%s(%s)',
+            rollupname, v_cascname, array_to_string(v_coldef_queue, ', '));
+        -- need an index, to make updates faster
+        EXECUTE format('CREATE INDEX ON pagg_data.%s_mat_%s(%s);',
+            rollupname, v_cascname, array_to_string(v_full_grpnames, ', '));
+        EXECUTE format('CREATE INDEX ON pagg_data.%s_mat_%s(%s, %s);',
+            rollupname, v_cascname, array_to_string(v_final_grpnames, ', '),
+            v_cascexpr
+            );
+        EXECUTE format('CREATE INDEX ON pagg_queues.%s_queue_%s(%s, %s);',
+            rollupname, v_cascname, array_to_string(v_final_grpnames, ', '),
+            v_cascexpr
+            );
+        --EXECUTE format('CREATE INDEX ON pagg_queues.%s_queue_%s(%s);',
+        --    rollupname, v_cascname, array_to_string(v_full_grpexprs, ', '));
 
         /*
          * create
-         *  a) trigger on the data (and finer grained) tables into the next queue tables
+         *  a) trigger on the data (and finer grained) tables into the next
+         *     queue tables
          *  b) queue flush function
          *
-         * TODO: We can actually combine all of these into one aggregation table?
+         * Right now only one aggregation is supported, should instead process
+         * all and put them into one aggregation table?
          */
-        FOR v_aggnum IN SELECT * FROM generate_series(1, array_length(agg_count, 1)) LOOP
-            v_aggname = agg_count_names[v_aggnum];
-            v_aggexpr = agg_count[v_aggnum];
+        IF array_length(agg_count, 1) > 0 THEN
+            v_aggname = agg_count_names[1];
+            v_aggexpr = agg_count[1];
+            IF v_cascnum = 1 THEN
+               v_incby = 1;
+            END IF;
+        ELSE
+            v_aggname = agg_sum_names[1];
+            v_aggexpr = agg_sum[1];
+            IF v_cascnum = 1 THEN
+               v_incby = v_aggexpr;
+            END IF;
+        END IF;
 
-            /* create trigger */
-            v_sql := format($trig$
+        /* create trigger */
+        v_sql := format($trig$
 CREATE OR REPLACE FUNCTION %2$s()
 RETURNS TRIGGER
 LANGUAGE plpgsql
@@ -166,17 +234,17 @@ BEGIN
     CASE TG_OP
     -- FIXME: dynamic expr & grouping columns
     WHEN 'INSERT' THEN
-        INSERT INTO %9$s(%7$s, %13$s, %8$s)
-        VALUES (%5$s, (SELECT %10$s FROM (SELECT NEW.*) f), +(SELECT %12$s FROM (SELECT NEW.*) f));
+        INSERT INTO %9$s(%5$s, %13$s, %8$s)
+        SELECT %6$s, %10$s, +(%12$s) FROM (SELECT NEW.*) f;
     WHEN 'UPDATE' THEN
-        INSERT INTO %9$s(%7$s, %13$s, %8$s)
-        VALUES (%6$s, (SELECT %10$s FROM (SELECT OLD.*) f), -(SELECT %12$s FROM (SELECT OLD.*) f));
+        INSERT INTO %9$s(%5$s, %13$s, %8$s)
+        SELECT %6$s, %10$s, -(%12$s) FROM (SELECT OLD.*) f;
 
-        INSERT INTO %9$s(%7$s, %13$s, %8$s)
-        VALUES (%5$s, (SELECT %10$s FROM (SELECT NEW.*) f), +(SELECT %12$s FROM (SELECT NEW.*) f));
+        INSERT INTO %9$s(%5$s, %13$s, %8$s)
+        SELECT %6$s, %10$s, +(%12$s) FROM (SELECT OLD.*) f;
     WHEN 'DELETE' THEN
-        INSERT INTO %9$s(%7$s, %13$s, %8$s)
-        VALUES (%6$s, (SELECT %10$s FROM (SELECT OLD.*) f), -(SELECT %12$s FROM (SELECT OLD.*) f));
+        INSERT INTO %9$s(%5$s, %13$s, %8$s)
+        SELECT %6$s, %10$s, -(%12$s) FROM (SELECT OLD.*) f;
     WHEN 'TRUNCATE' THEN
         RAISE 'truncation not supported right now';
     END CASE;
@@ -194,27 +262,40 @@ ON %1$s
 FOR EACH ROW
 EXECUTE PROCEDURE %2$s();
             $trig$,
+            -- 1$: target table (data table or finer grained table)
             v_curtarget,
+            -- 2$: procedurename
             'pagg.'||quote_ident(rollupname||'_queue_'||v_aggname||'_'||v_cascname),
-            'pagg_data.'||quote_ident(rollupname||'_'||v_cascname),
+            -- 3$: materialized table name
+            'pagg_data.'||quote_ident(rollupname||'_mat_'||v_cascname),
+            -- 4$: queue table name
             quote_ident(rollupname||'_queue_'||v_aggname||'_'||v_cascname),
-            array_to_string(v_new_grpnames, ', '),
-            array_to_string(v_old_grpnames, ', '),
+            -- 5$: group by columns
             array_to_string(v_final_grpnames, ', '),
+            -- 6$: group by expressions
+            array_to_string(v_final_grpexprs, ', '),
+            -- 7$: group by columns
+            'unused',
+            -- 8$: queue aggregation column name
             quote_ident(v_aggname||'_diff'),
+            -- 9$: queue table name
             'pagg_queues.'||quote_ident(rollupname||'_queue_'||v_cascname),
+            -- 10$: cascade expression (for group by)
             v_cascexpr,
+            -- 11$: flush function table name
             'pagg.'||quote_ident(rollupname||'_flush_'||v_aggname||'_'||v_cascname),
+            -- 12$: expression to increment/decrement values with
             v_incby,
+            -- 13$: cascading step column name
             cascade_name
             );
-            /* FIXME: Improve parameter ordering */
+         /* FIXME: Improve parameter ordering */
 
-            --RAISE NOTICE '%', v_sql;
-            EXECUTE v_sql;
+         --RAISE NOTICE '%', v_sql;
+         EXECUTE v_sql;
 
-            -- create queue flush function
-            v_sql := format($sql$
+         -- create queue flush function
+         v_sql := format($sql$
 CREATE OR REPLACE FUNCTION %1$s(p_wait bool DEFAULT false)
 RETURNS bool
 LANGUAGE plpgsql
@@ -239,7 +320,7 @@ BEGIN
     END IF;
 
     WITH
-    preagg AS (
+    aggregated_queue AS (
         SELECT %4$s, SUM(%5$s) AS %5$s
         FROM %2$s
         GROUP BY %4$s
@@ -249,16 +330,17 @@ BEGIN
             EXISTS(
                 SELECT *
                 FROM %6$s materialized
-                WHERE (%9$s) IS NOT DISTINCT FROM (%10$s)
+                -- FIXME: IS NOT DISTINCT would handle NULLs, but doesn't end up with index scans
+                WHERE (%9$s) = (%10$s)
             ) does_exist
-        FROM preagg
+        FROM aggregated_queue
     ),
     perform_updates AS (
         UPDATE %6$s AS materialized
         SET %7$s = materialized.%7$s + preexist.%5$s
         FROM preexist
         WHERE preexist.does_exist
-            AND (%9$s) IS NOT DISTINCT FROM (%8$s)
+            AND (%9$s) = (%8$s)
         RETURNING 1
     ),
     perform_inserts AS (
@@ -283,60 +365,60 @@ BEGIN
     RETURN true;
 END;
 $body$;
-                $sql$,
-                -- 1$: funcname
-                'pagg.'||quote_ident(rollupname||'_flush_'||v_aggname||'_'||v_cascname),
-                -- 2$: queuetablename
-                'pagg_queues.'||quote_ident(rollupname||'_queue_'||v_cascname),
-                -- 3$: aggname
-                v_aggname,
-                -- 4$: grpcols unadorned
-                array_to_string(v_full_grpnames, ', '),
-                -- 5$: diffcol
-                quote_ident(v_aggname||'_diff'),
-                -- 6$: mattablename
-                'pagg_data.'||quote_ident(rollupname||'_'||v_cascname),
-                -- 7$: valuecol
-                quote_ident(v_aggname),
-                -- 8$: preexist_grp
-                array_to_string(ARRAY(SELECT 'preexist.'||v FROM unnest(v_full_grpnames) v(v)), ', '),
-                -- 9$: materialized_grp
-                array_to_string(ARRAY(SELECT 'materialized.'||v FROM unnest(v_full_grpnames) v(v)), ', '),
-                --10$: preagg_grp
-                array_to_string(ARRAY(SELECT 'preagg.'||v FROM unnest(v_full_grpnames) v(v)), ', ')
-                );
-            EXECUTE v_sql;
+            $sql$,
+            -- 1$: funcname
+            'pagg.'||quote_ident(rollupname||'_flush_'||v_aggname||'_'||v_cascname),
+            -- 2$: queuetablename
+            'pagg_queues.'||quote_ident(rollupname||'_queue_'||v_cascname),
+            -- 3$: aggname
+            v_aggname,
+            -- 4$: grpcols unadorned
+            array_to_string(v_full_grpnames, ', '),
+            -- 5$: diffcol
+            quote_ident(v_aggname||'_diff'),
+            -- 6$: mattablename
+            'pagg_data.'||quote_ident(rollupname||'_mat_'||v_cascname),
+            -- 7$: valuecol
+            quote_ident(v_aggname),
+            -- 8$: preexist_grp
+            array_to_string(ARRAY(SELECT 'preexist.'||v FROM unnest(v_full_grpnames) v(v)), ', '),
+            -- 9$: materialized_grp
+            array_to_string(ARRAY(SELECT 'materialized.'||v FROM unnest(v_full_grpnames) v(v)), ', '),
+            --10$: aggregated_queue_grp
+            array_to_string(ARRAY(SELECT 'aggregated_queue.'||v FROM unnest(v_full_grpnames) v(v)), ', ')
+            );
+        EXECUTE v_sql;
 
-            /*
-             * append select from queue table to array of already existing
-             * queue table selects. The less granular steps need the queues
-             * from the more granular ones.
-             */
-             v_sql = format($sql$
+        /*
+         * append select from queue table to array of already existing
+         * queue table selects. The less granular steps need the queues
+         * from the more granular ones.
+         */
+         v_sql = format($sql$
     SELECT %2$s, %3$s, %5$s AS %4$s
     FROM %1$s
 $sql$,
-                -- 1$: queuetable
-                'pagg_queues.'||quote_ident(rollupname||'_queue_'||v_cascname),
-                -- 2$: groupcols
-                array_to_string(v_final_grpnames, ', '),
-                -- 3$: cascadename
-                cascade_name,
-                -- 4$: valuecol name
-                quote_ident(v_aggname),
-                -- 5$: valuecol_diff
-                quote_ident(v_aggname||'_diff')
-                );
+            -- 1$: queuetable
+            'pagg_queues.'||quote_ident(rollupname||'_queue_'||v_cascname),
+            -- 2$: groupcols
+            array_to_string(v_final_grpnames, ', '),
+            -- 3$: cascadename
+            cascade_name,
+            -- 4$: valuecol name
+            quote_ident(v_aggname),
+            -- 5$: valuecol_diff
+            quote_ident(v_aggname||'_diff')
+            );
 
-            v_viewsources = v_viewsources || v_sql;
+        v_viewsources = v_viewsources || v_sql;
 
-            -- build a select from all queue tables up to this granularity
-            v_queues = array_to_string(v_viewsources, '
+        -- build a select from all queue tables up to this granularity
+        v_queues = array_to_string(v_viewsources, '
   UNION ALL
 ');
 
-            -- CREATE VIEW from this granularities mat table + all queues
-            v_sql := format($sql$
+        -- CREATE VIEW from this granularities mat table + all queues
+        v_sql := format($sql$
 CREATE VIEW %1$s AS
 SELECT %3$s, %5$s AS %4$s, SUM(%7$s) AS %6$s
 FROM (
@@ -346,55 +428,54 @@ FROM (
 %9$s -- all queue tables follow
 ) combine
 GROUP BY %3$s, %5$s
-                $sql$,
-                -- 1$: viewtablename
-                'pagg.'||quote_ident(rollupname||'_'||v_cascname),
-                -- 2$: materialized table
-                'pagg_data.'||quote_ident(rollupname||'_'||v_cascname),
-                -- 3$: groupcols
-                array_to_string(v_final_grpnames, ', '),
-                -- 4$: cascadename
-                cascade_name,
-                -- 5$: cacadeexpr
-                v_cascexpr,
-                -- 6$: aggname
-                v_aggname,
-                -- 7$: valuecol
-                quote_ident(v_aggname),
-                -- 8$: valuecol_diff
-                quote_ident(v_aggname||'_diff'),
-                -- 9$: queue table selects, UNION ALL'ed
-                v_queues
-                );
+            $sql$,
+            -- 1$: viewtablename
+            'pagg.'||quote_ident(rollupname||'_'||v_cascname),
+            -- 2$: materialized table
+            'pagg_data.'||quote_ident(rollupname||'_mat_'||v_cascname),
+            -- 3$: groupcols
+            array_to_string(v_final_grpnames, ', '),
+            -- 4$: cascadename
+            cascade_name,
+            -- 5$: cacadeexpr
+            v_cascexpr,
+            -- 6$: aggname
+            v_aggname,
+            -- 7$: valuecol
+            quote_ident(v_aggname),
+            -- 8$: valuecol_diff
+            quote_ident(v_aggname||'_diff'),
+            -- 9$: queue table selects, UNION ALL'ed
+            v_queues
+            );
 
-            EXECUTE v_sql;
+        EXECUTE v_sql;
 
-            -- create sql to run to later actually fill the aggregation tables
-            -- want to only do that on the lowest aggregation level - the
-            -- upper ones will be filled automatically
-            IF v_cascnum = 1 THEN
-               v_fillsql = v_fillsql || format($sql$
+        -- create sql to run to later actually fill the aggregation tables
+        -- want to only do that on the lowest aggregation level - the
+        -- upper ones will be filled automatically
+        IF v_cascnum = 1 THEN
+           v_fillsql = v_fillsql || format($sql$
 INSERT INTO %1$s
 SELECT %2$s, %3$s, %4$s
 FROM %5$s
 GROUP BY %2$s, %3$s;
 $sql$,
-                -- 1$: mattablename
-                'pagg_data.'||quote_ident(rollupname||'_'||v_cascname),
-                -- 2$: grpcols
-                array_to_string(v_final_grpnames, ', '),
-                -- 3$: cascadexpr
-                v_cascexpr,
-                -- 4$: countexpr
-                'count(*)',
-                -- 5$: tblname
-                tablename::text
-                );
-            END IF;
+            -- 1$: mattablename
+            'pagg_data.'||quote_ident(rollupname||'_mat_'||v_cascname),
+            -- 2$: grpcols
+            array_to_string(v_final_grpexprs, ', '),
+            -- 3$: cascadexpr
+            v_cascexpr,
+            -- 4$: countexpr
+            'count(*)',
+            -- 5$: tblname
+            tablename::text
+            );
+        END IF;
 
-            v_incby = quote_ident(v_aggname);
-            v_curtarget = 'pagg_data.'||quote_ident(rollupname||'_'||v_cascname);
-        END LOOP; /* around count aggregates */
+        v_incby = quote_ident(v_aggname);
+        v_curtarget = 'pagg_data.'||quote_ident(rollupname||'_mat_'||v_cascname);
     END;
     END LOOP;  /* around aggregation granularities */
 
@@ -417,13 +498,16 @@ SELECT pagg.create_cascaded_rollup(
 
 SELECT pagg.create_cascaded_rollup(
     tablename := 'data',
-    rollupname := 'data_by_repo',
-    group_by := ARRAY[$$repo->'name'$$],
-    group_by_names := ARRAY['reponame'],
-    cascade := ARRAY[$$date_trunc(created_at, 'hour')$$, $$date_trunc(created_at, 'day')$$, $$date_trunc(created_at, 'month')$$],
+    rollupname := 'data_by_type_repo',
+    group_by := ARRAY['type', $$repo->>'name'$$],
+    group_by_names := ARRAY['type', 'reponame'],
+    cascade := ARRAY[$$date_trunc('hour', created_at)$$, $$date_trunc('day', created_at)$$, $$date_trunc('month', created_at)$$],
     cascade_names := ARRAY['hourly', 'daily', 'monthly'],
     cascade_name := 'created_at',
-    agg_sum := ARRAY[$$payload->>'size'$$],
+--    agg_count := ARRAY['*'],
+--    agg_count_names := ARRAY['countstar']
+    agg_sum := ARRAY[$$(payload->>'distinct_size')::int8$$],
     agg_sum_names := ARRAY['num_commits']
 );
+
 */
