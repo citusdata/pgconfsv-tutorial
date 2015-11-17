@@ -226,6 +226,7 @@ BEGIN
 
         /* create trigger */
         v_sql := format($trig$
+-- function inserting into the queue
 CREATE OR REPLACE FUNCTION %2$s()
 RETURNS TRIGGER
 LANGUAGE plpgsql
@@ -249,6 +250,20 @@ BEGIN
         RAISE 'truncation not supported right now';
     END CASE;
 
+    RETURN NULL;
+END;
+$body$;
+
+-- function occasionally, at xact end, triggering queue flushes
+--
+-- This is triggered via a deferred constraint trigger, so we a) only
+-- flush once in batch imports b) only acquire the queue lock at the
+-- end of an xact.
+CREATE OR REPLACE FUNCTION %15$s()
+RETURNS TRIGGER
+LANGUAGE plpgsql
+AS $body$
+BEGIN
     IF random() < 0.0001 THEN
        PERFORM %11$s(false);
     END IF;
@@ -256,11 +271,29 @@ BEGIN
     RETURN NULL;
 END;
 $body$;
+
+-- queue trigger
 CREATE TRIGGER %4$s
 AFTER INSERT OR UPDATE OR DELETE
 ON %1$s
 FOR EACH ROW
 EXECUTE PROCEDURE %2$s();
+
+-- consider queue flush trigger
+CREATE CONSTRAINT TRIGGER %14$s
+AFTER INSERT OR UPDATE OR DELETE
+ON %1$s
+DEFERRABLE INITIALLY DEFERRED
+FOR EACH ROW
+EXECUTE PROCEDURE %15$s();
+
+-- trigger preventing truncate
+CREATE TRIGGER %16$s
+AFTER TRUNCATE
+ON %1$s
+FOR EACH STATEMENT
+EXECUTE PROCEDURE %2$s();
+
             $trig$,
             -- 1$: target table (data table or finer grained table)
             v_curtarget,
@@ -268,7 +301,7 @@ EXECUTE PROCEDURE %2$s();
             'pagg.'||quote_ident(rollupname||'_queue_'||v_aggname||'_'||v_cascname),
             -- 3$: materialized table name
             'pagg_data.'||quote_ident(rollupname||'_mat_'||v_cascname),
-            -- 4$: queue table name
+            -- 4$: triggername DML
             quote_ident(rollupname||'_queue_'||v_aggname||'_'||v_cascname),
             -- 5$: group by columns
             array_to_string(v_final_grpnames, ', '),
@@ -287,7 +320,13 @@ EXECUTE PROCEDURE %2$s();
             -- 12$: expression to increment/decrement values with
             v_incby,
             -- 13$: cascading step column name
-            cascade_name
+            cascade_name,
+            -- 14$: triggername queue flush
+            quote_ident(rollupname||'_consider_flush_'||v_aggname||'_'||v_cascname),
+            -- 15$: functionname  queue flush
+            'pagg.'||quote_ident(rollupname||'_consider_flush_'||v_aggname||'_'||v_cascname),
+            -- 16$: triggername queue flush
+            quote_ident(rollupname||'_truncate_'||v_aggname||'_'||v_cascname)
             );
          /* FIXME: Improve parameter ordering */
 
@@ -318,6 +357,14 @@ BEGIN
             RETURN false;
         END IF;
     END IF;
+
+    IF NOT EXISTS(SELECT * FROM %2$s) THEN
+        RAISE NOTICE 'skipping empty queue';
+        RETURN false;
+    END IF;
+
+    ANALYZE %2$s;
+    ANALYZE %6$s;
 
     WITH
     aggregated_queue AS (
@@ -360,7 +407,7 @@ BEGIN
         (SELECT count(*) FROM perform_prune) prunes
     INTO v_updates, v_inserts, v_prunes;
 
-    RAISE NOTICE 'performed queue (hourly) flush: %% inserts, %% updates, %% prunes', v_inserts, v_updates, v_prunes;
+    RAISE NOTICE 'performed queue (%11$s) flush: %% inserts, %% updates, %% prunes', v_inserts, v_updates, v_prunes;
 
     RETURN true;
 END;
@@ -385,7 +432,9 @@ $body$;
             -- 9$: materialized_grp
             array_to_string(ARRAY(SELECT 'materialized.'||v FROM unnest(v_full_grpnames) v(v)), ', '),
             --10$: aggregated_queue_grp
-            array_to_string(ARRAY(SELECT 'aggregated_queue.'||v FROM unnest(v_full_grpnames) v(v)), ', ')
+            array_to_string(ARRAY(SELECT 'aggregated_queue.'||v FROM unnest(v_full_grpnames) v(v)), ', '),
+            --11$: cascname
+            v_cascname
             );
         EXECUTE v_sql;
 
