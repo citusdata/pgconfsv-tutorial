@@ -98,7 +98,6 @@ EXECUTE insertdata(%(id)s, %(type)s, %(public)s, %(created_at)s,
         # gh data urls are weird - zero padded for month/day, truncated for hour
         fname = '%d-%.2d-%.2d-%d.json.gz' % (day.year, day.month, day.day, day.hour)
         fpath = os.path.join('data', fname)
-        print fname
 
         try:
             os.stat(fpath)
@@ -126,7 +125,8 @@ EXECUTE insertdata(%(id)s, %(type)s, %(public)s, %(created_at)s,
             print "Error in file %s: %s" % (fpath, str(e))
             self.con.rollback()
         took = time.time() - start
-        print "loaded %d rows in %f seconds, %f rows/sec" % (rows, took, rows/took)
+        print "[%u] loaded %d rows from %s in %f seconds, %f rows/sec" % (
+            os.getpid(), rows, fpath, took, rows/took)
         return (rows, took, rows/took)
 
 runner = Runner(sys.argv[1],
