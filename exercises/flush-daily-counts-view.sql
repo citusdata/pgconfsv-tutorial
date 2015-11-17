@@ -1,4 +1,4 @@
-CREATE OR REPLACE FUNCTION flush_daily_counts_view()
+CREATE OR REPLACE FUNCTION flush_daily_counts_queue()
 RETURNS bool
 LANGUAGE plpgsql
 AS $body$
@@ -7,23 +7,23 @@ DECLARE
     v_updates int;
     v_prunes int;
 BEGIN
-    IF NOT pg_try_advisory_xact_lock('%2$s'::regclass::oid::bigint) THEN
+    IF NOT pg_try_advisory_xact_lock('data_daily_counts_queue'::regclass::oid::bigint) THEN
          RAISE NOTICE 'skipping queue flush';
          RETURN false;
     END IF;
 
     WITH
     aggregated_queue AS (
-        SELECT created_at, SUM(diff) AS value
+        SELECT created_date, SUM(diff) AS value
         FROM data_daily_counts_queue
-        GROUP BY created_at
+        GROUP BY created_date
     ),
     preexist AS (
         SELECT *,
             EXISTS(
                 SELECT *
                 FROM data_daily_counts_cached h
-                WHERE h.created_at = aggregated_queue.created_at
+                WHERE h.created_date = aggregated_queue.created_date
             ) does_exist
         FROM aggregated_queue
     ),
@@ -31,12 +31,12 @@ BEGIN
         UPDATE data_daily_counts_cached AS h
         SET value = h.value + preexist.value
         FROM preexist
-        WHERE preexist.does_exist AND h.created_at = preexist.created_at
+        WHERE preexist.does_exist AND h.created_date = preexist.created_date
         RETURNING 1
     ),
     perform_inserts AS (
         INSERT INTO data_daily_counts_cached
-        SELECT created_at, value
+        SELECT created_date, value
         FROM preexist
         WHERE NOT preexist.does_exist
         RETURNING 1

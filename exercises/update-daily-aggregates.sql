@@ -4,12 +4,12 @@ LANGUAGE plpgsql
 AS $body$
 BEGIN
 	LOOP
-		UPDATE data_daily_counts SET value = value+1 WHERE created_date = NEW.created_at::date;
+		UPDATE data_daily_counts_cached SET value = value+1 WHERE created_date = NEW.created_at::date;
 		IF found THEN
 			RETURN NULL;
 		END IF;
 		BEGIN
-			INSERT INTO data_daily_counts VALUES (NEW.created_at::date, 1);
+			INSERT INTO data_daily_counts_cached VALUES (NEW.created_at::date, 1);
 			RETURN NULL;	
 		EXCEPTION WHEN unique_violation THEN
       		-- retry
@@ -17,6 +17,8 @@ BEGIN
 	END LOOP;
 END;
 $body$;
+
+DROP TRIGGER IF EXISTS data_change ON data;
 
 CREATE TRIGGER data_change
 AFTER INSERT ON data
