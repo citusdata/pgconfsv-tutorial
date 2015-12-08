@@ -12,12 +12,12 @@ BEGIN
         VALUES (date_trunc('day', NEW.created_at), +1);
 
         INSERT INTO data_daily_counts_queue(created_date, diff)
-        VALUES (date_trunc('day', OLD.created_at), +1);
+        VALUES (date_trunc('day', OLD.created_at), -1);
 
     WHEN 'DELETE' THEN
 
         INSERT INTO data_daily_counts_queue(created_date, diff)
-        VALUES (date_trunc('day', OLD.created_at), +1);
+        VALUES (date_trunc('day', OLD.created_at), -1);
 
     END CASE;
 
